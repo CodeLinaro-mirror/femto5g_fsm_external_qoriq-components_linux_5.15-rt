@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (c) 2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __DRIVERS_INTERCONNECT_QCOM_ICC_RPMH_H__
@@ -25,6 +26,7 @@ struct qcom_icc_provider {
 	struct qcom_icc_bcm **bcms;
 	size_t num_bcms;
 	struct bcm_voter *voter;
+	struct list_head probe_list;
 };
 
 /**
