@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2008 Peter Korsgaard <jacmet@sunsite.dk>
  * Copyright (C) 2016 Freescale Semiconductor Inc.
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * This file is licensed under the terms of the GNU General Public License
  * version 2.  This program is licensed "as is" without any warranty of any
@@ -27,6 +28,7 @@
 #include <linux/bitops.h>
 #include <linux/interrupt.h>
 
+#define GPIO_IRQ_AFFINITY_CORE	0
 #define MPC8XXX_GPIO_PINS	32
 
 #define GPIO_DIR		0x00
@@ -309,6 +311,7 @@ static int mpc8xxx_probe(struct platform_device *pdev)
 	struct gpio_chip	*gc;
 	const struct mpc8xxx_gpio_devtype *devtype = NULL;
 	struct fwnode_handle *fwnode;
+	unsigned int mpc8xxx_cpu_affinity;
 	int ret;
 
 	mpc8xxx_gc = devm_kzalloc(&pdev->dev, sizeof(*mpc8xxx_gc), GFP_KERNEL);
@@ -413,6 +416,19 @@ static int mpc8xxx_probe(struct platform_device *pdev)
 			"failed to devm_request_irq(%d), ret = %d\n",
 			mpc8xxx_gc->irqn, ret);
 		goto err;
+	}
+
+	if (of_property_read_bool(np, "enable-controller-affinity")) {
+		if (of_property_read_u32(np, "gpio-cpu-affinity",
+				&mpc8xxx_cpu_affinity)) {
+			mpc8xxx_cpu_affinity = GPIO_IRQ_AFFINITY_CORE;
+			pr_warn("%pOF: gpio-cpu-affinity is missing, moving to default: %u\n",
+				np, mpc8xxx_cpu_affinity);
+		}
+
+		ret = irq_set_affinity(mpc8xxx_gc->irqn, cpumask_of(mpc8xxx_cpu_affinity));
+		if (ret)
+			pr_err("mpc8xxx_probe irq_set_affinity() failed, ret= %d\n", ret);
 	}
 
 	return 0;

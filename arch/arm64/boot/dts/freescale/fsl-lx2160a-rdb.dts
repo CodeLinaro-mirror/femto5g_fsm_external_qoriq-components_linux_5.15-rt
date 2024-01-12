@@ -3,10 +3,12 @@
 // Device Tree file for LX2160ARDB
 //
 // Copyright 2018-2020 NXP
+// Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 
 /dts-v1/;
 
 #include "fsl-lx2160a.dtsi"
+#include "external-modem-pcie.dtsi"
 
 / {
 	model = "NXP Layerscape LX2160ARDB";
@@ -14,8 +16,6 @@
 
 	aliases {
 		crypto = &crypto;
-		mmc0 = &esdhc0;
-		mmc1 = &esdhc1;
 		serial0 = &uart0;
 	};
 

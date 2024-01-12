@@ -4,6 +4,7 @@
  *
  * Copyright 2016 Freescale Semiconductor, Inc.
  * Copyright 2017 NXP
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Abhimanyu Saini <abhimanyu.saini@nxp.com>
  *
@@ -13,6 +14,7 @@
 
 #include "fsl-ls2088a.dtsi"
 #include "fsl-ls208xa-rdb.dtsi"
+#include "external-modem-pcie.dtsi"
 
 / {
 	model = "Freescale Layerscape 2088A RDB Board";
