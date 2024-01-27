@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved. */
 #ifndef _LINUX_DMA_MAPPING_H
 #define _LINUX_DMA_MAPPING_H
 
@@ -417,6 +418,14 @@ static inline void *dma_alloc_coherent(struct device *dev, size_t size,
 {
 	return dma_alloc_attrs(dev, size, dma_handle, gfp,
 			(gfp & __GFP_NOWARN) ? DMA_ATTR_NO_WARN : 0);
+}
+
+static inline void *dma_zalloc_coherent(struct device *dev, size_t size,
+		dma_addr_t *dma_handle, gfp_t flag)
+{
+	void *ret = dma_alloc_coherent(dev, size, dma_handle,
+			flag | __GFP_ZERO);
+	return ret;
 }
 
 static inline void dma_free_coherent(struct device *dev, size_t size,

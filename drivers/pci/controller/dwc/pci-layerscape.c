@@ -4,6 +4,7 @@
  *
  * Copyright (C) 2014 Freescale Semiconductor.
  * Copyright 2020 NXP
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Author: Minghuan Lian <Minghuan.Lian@freescale.com>
  */
@@ -29,6 +30,12 @@
 #define PCIE_STRFMR1		0x71c /* Symbol Timer & Filter Mask Register1 */
 #define PCIE_ABSERR		0x8d0 /* Bridge Slave Error Response Register */
 #define PCIE_ABSERR_SETTING	0x9401 /* Forward error of non-posted request */
+
+#define PCIE_PM_SCR		0x44
+#define PCIE_PM_SCR_PMEPS_D0	0x0
+#define PCIE_PM_SCR_PMEPS_D3	0x3
+
+#define PCIE_LNKCTL		0x80  /* PCIe link ctrl Register */
 
 /* PF Message Command Register */
 #define LS_PCIE_PF_MCR		0x2c
@@ -114,6 +121,14 @@ static void ls_pcie_drop_msg_tlp(struct ls_pcie *pcie)
 	val = ioread32(pci->dbi_base + PCIE_STRFMR1);
 	val &= 0xDFFFFFFF;
 	iowrite32(val, pci->dbi_base + PCIE_STRFMR1);
+}
+
+static void ls_pcie_disable_outbound_atus(struct ls_pcie *pcie)
+{
+	int i;
+
+	for (i = 0; i < PCIE_IATU_NUM; i++)
+		dw_pcie_disable_atu(pcie->pci, i, DW_PCIE_REGION_OUTBOUND);
 }
 
 /* Forward error response of outbound non-posted requests */
@@ -235,12 +250,11 @@ static void ls_pcie_exit_from_l2(struct ls_pcie *pcie)
 static void ls_pcie_retrain_link(struct ls_pcie *pcie)
 {
 	struct dw_pcie *pci = pcie->pci;
-	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
 	u32 val;
 
-	val = dw_pcie_readw_dbi(pci, offset + PCI_EXP_LNKCTL);
+	val = dw_pcie_readw_dbi(pci, PCIE_LNKCTL);
 	val |= PCI_EXP_LNKCTL_RL;
-	dw_pcie_writew_dbi(pci, offset + PCI_EXP_LNKCTL, val);
+	dw_pcie_writew_dbi(pci, PCIE_LNKCTL, val);
 }
 
 static void ls1021a_pcie_exit_from_l2(struct ls_pcie *pcie)
@@ -319,13 +333,12 @@ static int ls_pcie_pm_init(struct ls_pcie *pcie)
 static void ls_pcie_set_dstate(struct ls_pcie *pcie, u32 dstate)
 {
 	struct dw_pcie *pci = pcie->pci;
-	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_PM);
 	u32 val;
 
-	val = dw_pcie_readw_dbi(pci, offset + PCI_PM_CTRL);
+	val = dw_pcie_readw_dbi(pci, PCIE_PM_SCR);
 	val &= ~PCI_PM_CTRL_STATE_MASK;
 	val |= dstate;
-	dw_pcie_writew_dbi(pci, offset + PCI_PM_CTRL, val);
+	dw_pcie_writew_dbi(pci, PCIE_PM_SCR, val);
 }
 
 static int ls_pcie_host_init(struct pcie_port *pp)
@@ -333,6 +346,12 @@ static int ls_pcie_host_init(struct pcie_port *pp)
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct ls_pcie *pcie = to_ls_pcie(pci);
 
+	/*
+	 * Disable outbound windows configured by the bootloader to avoid
+	 * one transaction hitting multiple outbound windows.
+	 * dw_pcie_setup_rc() will reconfigure the outbound windows.
+	 */
+	ls_pcie_disable_outbound_atus(pcie);
 	ls_pcie_fix_error_response(pcie);
 
 	dw_pcie_dbi_ro_wr_en(pci);
@@ -341,6 +360,31 @@ static int ls_pcie_host_init(struct pcie_port *pp)
 
 	ls_pcie_drop_msg_tlp(pcie);
 
+	dw_pcie_setup_rc(pp);
+
+	return 0;
+}
+
+static int ls_pcie_msi_host_init(struct pcie_port *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+	struct device *dev = pci->dev;
+	struct device_node *np = dev->of_node;
+	struct device_node *msi_node;
+
+	/*
+	 * The MSI domain is set by the generic of_msi_configure().  This
+	 * .msi_host_init() function keeps us from doing the default MSI
+	 * domain setup in dw_pcie_host_init() and also enforces the
+	 * requirement that "msi-parent" exists.
+	 */
+	msi_node = of_parse_phandle(np, "msi-parent", 0);
+	if (!msi_node) {
+		dev_err(dev, "failed to find msi-parent\n");
+		return -EINVAL;
+	}
+
+	of_node_put(msi_node);
 	return 0;
 }
 
@@ -364,6 +408,7 @@ static struct ls_pcie_host_pm_ops ls_pcie_host_pm_ops = {
 
 static const struct dw_pcie_host_ops ls_pcie_host_ops = {
 	.host_init = ls_pcie_host_init,
+	.msi_host_init = ls_pcie_msi_host_init,
 };
 
 static const struct ls_pcie_drvdata ls1021a_drvdata = {
@@ -397,7 +442,59 @@ static const struct of_device_id ls_pcie_of_match[] = {
 	{ },
 };
 
-static int ls_pcie_probe(struct platform_device *pdev)
+static int __init ls_add_pcie_port(struct ls_pcie *pcie)
+{
+	struct dw_pcie *pci = pcie->pci;
+	struct pcie_port *pp = &pci->pp;
+	struct device *dev = pci->dev;
+	int ret;
+
+	pp->ops = pcie->drvdata->ops;
+
+	ret = dw_pcie_host_init(pp);
+	if (ret) {
+		dev_err(dev, "failed to initialize host\n");
+		return ret;
+	}
+
+	if (dw_pcie_link_up(pci)) {
+		dev_dbg(pci->dev, "Endpoint is present\n");
+		pcie->ep_presence = true;
+	}
+
+	if (pcie->drvdata->pm_ops && pcie->drvdata->pm_ops->pm_init &&
+	    !pcie->drvdata->pm_ops->pm_init(pcie))
+		pcie->pm_support = true;
+
+	return 0;
+}
+
+#define SYSTEM_VERSION_REG      0xA4
+#define NXP_BOARD_INFO          0x1E00000
+#define NXP_BOARD_INFO_SIZE     0x100
+#define NXP_LX_BOARD            0x87360000
+
+#define NXP_PCIE1_ADDR          0x3600000 /* slot 1 */
+#define NXP_PCIE2_ADDR          0x3800000 /* slot 2 */
+
+#define NXP_LX_MAX_SLOT         2
+struct lx_force_config {
+        u32 pcie_addr;
+        u32 force3_cfg;
+        bool can_force3;
+        u32 domain;
+        void __iomem *dw_pci_space;
+        struct device *dw_pcie_dev;
+};
+static u32 dw_svr;
+
+/* force configuration, indexed by domain */
+struct lx_force_config lx_force_config[NXP_LX_MAX_SLOT] = {
+        {NXP_PCIE1_ADDR, 0x80, 0, 0, NULL, NULL},
+        {NXP_PCIE2_ADDR, 0x40, 0, 1, NULL, NULL}
+};
+
+static int __init ls_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct dw_pcie *pci;
@@ -416,7 +513,6 @@ static int ls_pcie_probe(struct platform_device *pdev)
 	pcie->drvdata = of_device_get_match_data(dev);
 
 	pci->dev = dev;
-	pci->pp.ops = pcie->drvdata->ops;
 
 	pcie->pci = pci;
 
@@ -438,18 +534,9 @@ static int ls_pcie_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, pcie);
 
-	ret = dw_pcie_host_init(&pci->pp);
-	if (ret)
+	ret = ls_add_pcie_port(pcie);
+	if (ret < 0)
 		return ret;
-
-	if (dw_pcie_link_up(pci)) {
-		dev_dbg(pci->dev, "Endpoint is present\n");
-		pcie->ep_presence = true;
-	}
-
-	if (pcie->drvdata->pm_ops && pcie->drvdata->pm_ops->pm_init &&
-	    !pcie->drvdata->pm_ops->pm_init(pcie))
-		pcie->pm_support = true;
 
 	return 0;
 }
@@ -488,7 +575,7 @@ static int ls_pcie_suspend_noirq(struct device *dev)
 		return ret;
 	}
 
-	ls_pcie_set_dstate(pcie, 0x3);
+	ls_pcie_set_dstate(pcie, PCIE_PM_SCR_PMEPS_D3);
 
 	return 0;
 }
@@ -502,7 +589,7 @@ static int ls_pcie_resume_noirq(struct device *dev)
 	if (!ls_pcie_pm_check(pcie))
 		return 0;
 
-	ls_pcie_set_dstate(pcie, 0x0);
+	ls_pcie_set_dstate(pcie, PCIE_PM_SCR_PMEPS_D0);
 
 	pcie->drvdata->pm_ops->exit_from_l2(pcie);
 
@@ -514,8 +601,6 @@ static int ls_pcie_resume_noirq(struct device *dev)
 		dev_err(dev, "ls_pcie_host_init failed! ret = 0x%x\n", ret);
 		return ret;
 	}
-
-	dw_pcie_setup_rc(&pci->pp);
 
 	ret = dw_pcie_wait_for_link(pci);
 	if (ret) {
@@ -532,8 +617,137 @@ static const struct dev_pm_ops ls_pcie_pm_ops = {
 				      ls_pcie_resume_noirq)
 };
 
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+
+static bool lx_pcie_reset_force3(unsigned int domain)
+{
+#define NXP_LX_PCIE_CPLD_SLAVE_ADDR 0x66
+#define NXP_LX_PCIE_FORCE_3_REG 0x45
+
+#define PEX_PEXLUT_LTSSM   0xc07fc
+#define PEX_PF0_PME_MES_DR 0xc0020
+
+#define LTSSM_LINK_UP      0x11
+#define LDD_AND_LUD_BITS   0x280
+
+        u32 val;
+        struct i2c_msg lx_cpld_reset_r_msg[2];
+        struct i2c_msg lx_cpld_reset_w_msg;
+        unsigned char reset_byte;
+        unsigned char reset_reg = NXP_LX_PCIE_FORCE_3_REG;
+        unsigned char buf[2];
+        struct i2c_adapter *i2c_a;
+        int ret;
+        void __iomem *dw_pci_space;
+
+        if (domain >= NXP_LX_MAX_SLOT || !lx_force_config[domain].can_force3) {
+                pr_err("The current NXP board PCIe domain %d "
+                        "does not support live PCIe reset\n", domain);
+                return false;
+        }
+        dw_pci_space = lx_force_config[domain].dw_pci_space;
+        lx_cpld_reset_r_msg[0].addr = NXP_LX_PCIE_CPLD_SLAVE_ADDR;
+        lx_cpld_reset_r_msg[0].flags = 0;
+        lx_cpld_reset_r_msg[0].len = sizeof(reset_reg);
+        lx_cpld_reset_r_msg[0].buf = &reset_reg;
+        lx_cpld_reset_r_msg[1].addr = NXP_LX_PCIE_CPLD_SLAVE_ADDR;
+        lx_cpld_reset_r_msg[1].flags = I2C_M_RD;
+        lx_cpld_reset_r_msg[1].len = sizeof(reset_byte);
+        lx_cpld_reset_r_msg[1].buf = &reset_byte;
+
+        lx_cpld_reset_w_msg.addr = NXP_LX_PCIE_CPLD_SLAVE_ADDR;
+        lx_cpld_reset_w_msg.flags = 0;
+        lx_cpld_reset_w_msg.len = 2;
+        lx_cpld_reset_w_msg.buf = buf;
+        buf[0] = reset_reg;
+        i2c_a = i2c_get_adapter(0);
+        if (!i2c_a) {
+                pr_err("%s: can not get i2c-0 adaptor\n", __func__);
+                return false;
+        }
+
+        pr_info("%s: ls_pcie_reset_force3\n", __func__);
+
+        val = readl(dw_pci_space + PEX_PEXLUT_LTSSM);
+        pr_info("%s: read PEX_PEXLUT_LTSSM %x\n", __func__, val);
+
+        val = readl(dw_pci_space + PEX_PF0_PME_MES_DR);
+        pr_info("%s: read PEX_PF0_PME_MES_DR %x\n", __func__, val);
+
+        writel(val, dw_pci_space + PEX_PF0_PME_MES_DR);
+        val = readl(dw_pci_space + PEX_PF0_PME_MES_DR);
+        pr_info("%s: after write PEX_PF0_PME_MES_DR %x\n", __func__, val);
+
+        /* i2c to toggle force 3 reg */
+        ret = i2c_transfer(i2c_a, lx_cpld_reset_r_msg, 2);
+        if (ret < 0) {
+                pr_err("%s: i2c_transfer read error ret %d\n", __func__, ret);
+                return false;
+        }
+        pr_info("%s: read force3 reg val %x\n", __func__, reset_byte);
+
+        buf[1] = lx_force_config[domain].force3_cfg;
+        ret = i2c_transfer(i2c_a, &lx_cpld_reset_w_msg, 1);
+        if (ret < 0) {
+                pr_err("%s: i2c_transfer write error ret %d\n", __func__, ret);
+                return false;
+        }
+        pr_info("%s: write force3 reg with 0x80\n", __func__);
+        udelay(10);
+
+        ret = i2c_transfer(i2c_a, lx_cpld_reset_r_msg, 2);
+        if (ret < 0) {
+                pr_err("%s: i2c_transfer read error ret %d\n", __func__, ret);
+                return false;
+        }
+        pr_info("%s: read force3 reg val %x\n", __func__, reset_byte);
+        udelay(10);
+
+        val = readl(dw_pci_space + PEX_PF0_PME_MES_DR);
+        pr_info("%s: read PEX_PF0_PME_MES_DR %x\n", __func__, val);
+
+        val = readl(dw_pci_space + PEX_PEXLUT_LTSSM);
+        pr_info("%s: read PEX_PEXLUT_LTSSM %x\n", __func__, val);
+        udelay(10);
+
+        /* i2c to toggle force 3 reg */
+        buf[1] = 0x0;
+        ret = i2c_transfer(i2c_a, &lx_cpld_reset_w_msg, 1);
+        if (ret < 0) {
+                pr_err("%s: i2c_transfer write error ret %d\n", __func__, ret);
+                return false;
+        }
+        pr_info("%s: write force3 reg with 0x0\n",  __func__);
+        udelay(10);
+        ret = i2c_transfer(i2c_a, lx_cpld_reset_r_msg, 2);
+        if (ret < 0) {
+                pr_err("%s: i2c_transfer read error ret %d\n", __func__, ret);
+                return false;
+        }
+        pr_info("%s: read force3 reg val %x\n", __func__, reset_byte);
+        udelay(1000);
+
+        val = readl(dw_pci_space + PEX_PEXLUT_LTSSM);
+        pr_info("%s: read PEX_PEXLUT_LTSSM %x\n", __func__, val);
+
+        val = readl(dw_pci_space + PEX_PF0_PME_MES_DR);
+        pr_info("%s: read PEX_PF0_PME_MES_DR %x\n", __func__, val);
+        return true;
+}
+
+
+typedef bool (*pcie_reset_force_func)(unsigned int);
+pcie_reset_force_func get_pcie_reset_force_func(void)
+{
+        if ((dw_svr & 0xffff0000) == NXP_LX_BOARD)
+                return  lx_pcie_reset_force3;
+        else
+                return NULL;
+}
+EXPORT_SYMBOL(get_pcie_reset_force_func);
+
 static struct platform_driver ls_pcie_driver = {
-	.probe = ls_pcie_probe,
 	.driver = {
 		.name = "layerscape-pcie",
 		.of_match_table = ls_pcie_of_match,
@@ -541,4 +755,4 @@ static struct platform_driver ls_pcie_driver = {
 		.pm = &ls_pcie_pm_ops,
 	},
 };
-builtin_platform_driver(ls_pcie_driver);
+builtin_platform_driver_probe(ls_pcie_driver, ls_pcie_probe);
