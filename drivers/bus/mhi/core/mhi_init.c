@@ -430,7 +430,7 @@ int mhi_init_irq_setup(struct mhi_controller *mhi_cntrl)
 			continue;
 
 		ret = request_irq(mhi_cntrl->irq[mhi_event->msi],
-				  mhi_msi_handlr, IRQF_SHARED | IRQF_NO_SUSPEND,
+				  mhi_msi_handlr, IRQF_NO_THREAD | IRQF_NO_SUSPEND,
 				  "mhi", mhi_event);
 		if (ret) {
 			MHI_CNTRL_ERR("Error requesting irq:%d for ev:%d\n",

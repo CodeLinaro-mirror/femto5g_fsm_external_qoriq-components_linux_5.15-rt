@@ -182,6 +182,7 @@ static int __init fsm_tti_intr_probe(struct platform_device *pdev)
 			flags |= ((flags & IRQF_TRIGGER_RISING) ?
 				IRQF_TRIGGER_FALLING : IRQF_TRIGGER_RISING);
 		}
+		flags |= IRQF_NO_THREAD;
 		if (i == 0)
 			snprintf(p->device_data->name,
 				FSM_TTI_MAX_NAME_LEN - 1,
