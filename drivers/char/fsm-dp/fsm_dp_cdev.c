@@ -704,6 +704,12 @@ static void __rxqueue_vma_open(struct vm_area_struct *vma)
 static void __rxqueue_vma_close(struct vm_area_struct *vma)
 {
 	struct fsm_dp_rxqueue_vma *rxq_vma = vma->vm_private_data;
+
+	if (rxq_vma->type >= FSM_DP_RX_TYPE_LAST){
+		FSM_DP_ERROR("%s: Index out of range\n", __func__);
+		return;
+	}
+
 	struct fsm_dp_rxqueue *rxq = rxqueue_vma_to_rxqueue(rxq_vma);
 
 	FSM_DP_DEBUG("%s: vma %p\n", __func__, vma);
