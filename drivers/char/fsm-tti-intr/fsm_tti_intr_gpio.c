@@ -32,6 +32,7 @@ static irqreturn_t fsm_tti_gpio_irq_handler(int irq, void *irq_data)
 	struct fsm_tti_intr_drv *tti_intr_drv =
 		(struct fsm_tti_intr_drv *)irq_data;
 	static unsigned int allow_intr_processing = 0;
+	irqreturn_t ret = IRQ_HANDLED;
 
 	if (!tti_intr_drv->device_data->assert_falling_edge)
 	{
@@ -76,18 +77,20 @@ static irqreturn_t fsm_tti_gpio_irq_handler(int irq, void *irq_data)
 		/* wake up the poll ops */
 		if (tti_intr_drv->is_poll_enabled) {
 			atomic_set(&tti_intr_drv->tti_updated, 1);
-			tasklet_schedule(&tti_intr_drv->task);
+			ret = IRQ_WAKE_THREAD;
 		}
 	}
-	return IRQ_HANDLED;
+	return ret;
 }
 
-void fsm_tti_notify_task(unsigned long data)
+static irqreturn_t fsm_tti_notify_task(int irq, void *data)
 {
 	struct fsm_tti_intr_drv *tti_intr_drv = (struct fsm_tti_intr_drv *)data;
 
 	if (tti_intr_drv)
 		wake_up(&tti_intr_drv->tti_poll_waitqueue);
+
+	return IRQ_HANDLED;
 }
 
 static int __init fsm_tti_intr_probe(struct platform_device *pdev)
@@ -121,8 +124,6 @@ static int __init fsm_tti_intr_probe(struct platform_device *pdev)
 		kfree(tti_intr_drv);
 		return -ENOENT;
 	}
-
-	tasklet_init(&tti_intr_drv->task, fsm_tti_notify_task, (ulong)tti_intr_drv);
 
 	/* allocate space for device info */
 	device_data = devm_kzalloc(&pdev->dev, MAX_FSM_TTI_DEVICE *
@@ -193,9 +194,10 @@ static int __init fsm_tti_intr_probe(struct platform_device *pdev)
 				FSM_TTI_MAX_NAME_LEN - 1,
 				"%s.%d_%d",
 				pdev->name, pdev->id, i + 1);
-		ret = devm_request_irq(&pdev->dev,
+		ret = devm_request_threaded_irq(&pdev->dev,
 				p->device_data->irq,
 				fsm_tti_gpio_irq_handler,
+				fsm_tti_notify_task,
 				flags,
 				p->device_data->name,
 				p);
